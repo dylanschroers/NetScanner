@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -193,6 +193,11 @@ pub fn run(iface: &str) -> std::io::Result<super::ScanExit> {
         // Keyboard
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
+                // Windows delivers releases as well as presses; see menu.rs.
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+
                 match key.code {
                     KeyCode::Char('q') => { exit = super::ScanExit::Quit;      break; }
                     KeyCode::Esc       => { exit = super::ScanExit::BackToMenu; break; }

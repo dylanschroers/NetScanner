@@ -37,14 +37,14 @@ pub fn ping(target: Ipv4Addr, timeout_ms: u64) -> bool {
         return false;
     }
 
+    super::set_recv_timeout(&rx, Duration::from_millis(timeout_ms));
     let mut iter = icmp_packet_iter(&mut rx);
-    let deadline = Duration::from_millis(timeout_ms);
 
-    match iter.next_with_timeout(deadline) {
-        Ok(Some((packet, addr))) => {
+    match iter.next() {
+        Ok((packet, addr)) => {
             addr == std::net::IpAddr::V4(target)
                 && packet.get_icmp_type() == IcmpTypes::EchoReply
         }
-        _ => false,
+        Err(_) => false,
     }
 }

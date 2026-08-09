@@ -35,11 +35,11 @@ pub fn syn_scan(source_ip: Ipv4Addr, target: Ipv4Addr, port: u16, timeout_ms: u6
         return PortState::Filtered;
     }
 
+    super::set_recv_timeout(&rx, Duration::from_millis(timeout_ms));
     let mut iter = tcp_packet_iter(&mut rx);
-    let deadline = Duration::from_millis(timeout_ms);
 
-    match iter.next_with_timeout(deadline) {
-        Ok(Some((packet, addr))) => {
+    match iter.next() {
+        Ok((packet, addr)) => {
             if addr != std::net::IpAddr::V4(target) {
                 return PortState::Filtered;
             }
@@ -52,7 +52,7 @@ pub fn syn_scan(source_ip: Ipv4Addr, target: Ipv4Addr, port: u16, timeout_ms: u6
                 PortState::Filtered
             }
         }
-        _ => PortState::Filtered,
+        Err(_) => PortState::Filtered,
     }
 }
 
