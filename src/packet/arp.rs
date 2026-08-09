@@ -3,46 +3,113 @@ use pnet::packet::arp::{ArpHardwareTypes, ArpOperations, ArpPacket, MutableArpPa
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
 use pnet::packet::{MutablePacket, Packet};
 use pnet::util::MacAddr;
+use std::collections::HashSet;
 use std::net::Ipv4Addr;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{sync_channel, RecvTimeoutError};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const ETHERNET_HEADER_LEN: usize = 14;
 const ARP_PACKET_LEN: usize = 28;
 
-/// Sends an ARP request for `target` on `iface` and returns the MAC address if replied.
-pub fn arp_request(iface: &NetworkInterface, target: Ipv4Addr, timeout_ms: u64) -> Option<MacAddr> {
-    let source_mac = iface.mac?;
-    let source_ip = iface.ips.iter().find_map(|ip| {
-        if let std::net::IpAddr::V4(v4) = ip.ip() { Some(v4) } else { None }
-    })?;
-
-    let (mut tx, mut rx) = match datalink::channel(iface, Default::default()) {
-        Ok(datalink::Channel::Ethernet(tx, rx)) => (tx, rx),
-        _ => return None,
+/// Broadcasts an ARP request for every address in `targets` on `iface`, then
+/// collects replies for up to `timeout_ms` total, invoking `on_reply` for each
+/// distinct host that answers.
+///
+/// This opens a single channel for the whole batch rather than one per target:
+/// a /24 sweep would otherwise open 254 Npcap adapters at once.
+///
+/// The receive loop runs on its own thread because the deadline cannot be
+/// enforced inside it. `DataLinkReceiver::next` blocks with no way to interrupt
+/// it, and `datalink::Config::read_timeout` is honoured only by the Linux, BPF
+/// and netmap backends — on the winpcap backend Windows uses it is ignored
+/// entirely, so a read on a silent link never returns.
+pub fn sweep<F>(iface: &NetworkInterface, targets: &[Ipv4Addr], timeout_ms: u64, mut on_reply: F)
+where
+    F: FnMut(Ipv4Addr, MacAddr),
+{
+    let Some(source_mac) = iface.mac else { return };
+    let Some(source_ip) = iface.ips.iter().find_map(|ip| match ip.ip() {
+        std::net::IpAddr::V4(v4) => Some(v4),
+        _ => None,
+    }) else {
+        return;
     };
 
-    let mut eth_buf = vec![0u8; ETHERNET_HEADER_LEN + ARP_PACKET_LEN];
-    build_arp_packet(&mut eth_buf, source_mac, source_ip, target);
+    let (mut tx, rx) = match datalink::channel(iface, Default::default()) {
+        Ok(datalink::Channel::Ethernet(tx, rx)) => (tx, rx),
+        _ => return,
+    };
 
-    let _ = tx.send_to(&eth_buf, None);
+    // Bounded so a flood of ARP traffic cannot grow the queue without limit;
+    // the reader drops replies rather than blocking once it is full.
+    let (reply_tx, reply_rx) = sync_channel::<(Ipv4Addr, MacAddr)>(256);
+    let stop = Arc::new(AtomicBool::new(false));
 
-    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let reader_stop = Arc::clone(&stop);
+    std::thread::spawn(move || read_replies(rx, reply_tx, reader_stop));
+
+    let mut frame = vec![0u8; ETHERNET_HEADER_LEN + ARP_PACKET_LEN];
+    for target in targets {
+        build_arp_packet(&mut frame, source_mac, source_ip, *target);
+        let _ = tx.send_to(&frame, None);
+    }
+
+    let wanted: HashSet<Ipv4Addr> = targets.iter().copied().collect();
+    let mut seen = HashSet::new();
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+
     loop {
-        if std::time::Instant::now() > deadline {
-            return None;
-        }
-        if let Ok(frame) = rx.next() {
-            if let Some(eth) = EthernetPacket::new(frame) {
-                if eth.get_ethertype() == EtherTypes::Arp {
-                    if let Some(arp) = ArpPacket::new(eth.payload()) {
-                        if arp.get_operation() == ArpOperations::Reply
-                            && arp.get_sender_proto_addr() == target
-                        {
-                            return Some(arp.get_sender_hw_addr());
-                        }
-                    }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        match reply_rx.recv_timeout(remaining) {
+            Ok((ip, mac)) => {
+                // Other hosts' ARP chatter lands here too, so filter to the
+                // batch and report each address only once.
+                if wanted.contains(&ip) && seen.insert(ip) {
+                    on_reply(ip, mac);
                 }
             }
+            Err(RecvTimeoutError::Timeout) => break,
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    // The reader is parked in `next()`. Flag it, then put one more frame on the
+    // wire so it wakes, observes the flag and drops the channel. On a silent
+    // link this is the only thing that ends the thread; if the frame is lost the
+    // thread exits on the next frame the interface sees instead.
+    stop.store(true, Ordering::Relaxed);
+    build_arp_packet(&mut frame, source_mac, source_ip, source_ip);
+    let _ = tx.send_to(&frame, None);
+}
+
+fn read_replies(
+    mut rx: Box<dyn datalink::DataLinkReceiver>,
+    reply_tx: std::sync::mpsc::SyncSender<(Ipv4Addr, MacAddr)>,
+    stop: Arc<AtomicBool>,
+) {
+    while let Ok(frame) = rx.next() {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(eth) = EthernetPacket::new(frame) else { continue };
+        if eth.get_ethertype() != EtherTypes::Arp {
+            continue;
+        }
+        let Some(arp) = ArpPacket::new(eth.payload()) else { continue };
+        if arp.get_operation() != ArpOperations::Reply {
+            continue;
+        }
+        // A full queue means the consumer is behind or gone; either way there is
+        // nothing useful to do but drop the reply.
+        if reply_tx
+            .try_send((arp.get_sender_proto_addr(), arp.get_sender_hw_addr()))
+            .is_err()
+        {
+            continue;
         }
     }
 }
