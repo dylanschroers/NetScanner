@@ -2,6 +2,7 @@ use crossterm::event::KeyCode;
 use ratatui::{
     layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
+    text::Span,
     widgets::{Block, Borders, Cell, Padding, Row, Table, TableState},
     Frame,
 };
@@ -22,6 +23,19 @@ const MAX_HOTKEYS: usize = 9;
 pub struct PickerItem {
     pub columns: [String; COLUMNS],
     pub value: String,
+}
+
+/// How a picker should be drawn on a given frame.
+///
+/// Grouped rather than passed loose because a screen with several controls also
+/// has to say which one holds focus, and that is one argument too many.
+pub struct PickerView<'a> {
+    pub title: &'a str,
+    pub headers: [&'a str; COLUMNS],
+    pub widths: [Constraint; COLUMNS],
+    /// Drives the highlight, so a picker sharing a screen with text fields does
+    /// not look active while the caret is somewhere else.
+    pub focused: bool,
 }
 
 /// What a key did, so the screen owning the picker knows whether to act on it.
@@ -89,14 +103,7 @@ impl Picker {
         }
     }
 
-    pub fn render(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        title: &str,
-        headers: [&str; COLUMNS],
-        widths: [Constraint; COLUMNS],
-    ) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, view: PickerView) {
         // Split the borrow so the rows can read `items` while the table renders
         // through `state`.
         let Self { items, state } = self;
@@ -114,27 +121,37 @@ impl Picker {
             .collect();
 
         let mut header_cells = vec![Cell::from("#")];
-        header_cells.extend(headers.into_iter().map(Cell::from));
+        header_cells.extend(view.headers.into_iter().map(Cell::from));
 
         let mut all_widths = vec![Constraint::Length(2)];
-        all_widths.extend(widths);
+        all_widths.extend(view.widths);
+
+        let (highlight, title_style) = if view.focused {
+            (
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Cyan),
+            )
+        } else {
+            (
+                Style::default().add_modifier(Modifier::DIM),
+                Style::default().fg(Color::DarkGray),
+            )
+        };
 
         let table = Table::new(rows, all_widths)
             .header(
                 Row::new(header_cells)
                     .style(Style::default().add_modifier(Modifier::BOLD).fg(Color::White)),
             )
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("▶ ")
+            .highlight_style(highlight)
+            .highlight_symbol(if view.focused { "▶ " } else { "  " })
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(title)
+                    .title(Span::styled(view.title, title_style))
                     // Keeps the last column off the border.
                     .padding(Padding::horizontal(1)),
             );

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -18,7 +19,7 @@ use ratatui::{
     Frame, Terminal,
 };
 
-use super::picker::{Picker, PickerAction, PickerItem};
+use super::picker::{Picker, PickerAction, PickerItem, PickerView};
 
 // What the menu returns to main once the user confirms their config
 pub enum MenuResult {
@@ -34,28 +35,45 @@ enum Screen {
     PassiveInput,
 }
 
+// Fields the active scan screen cycles through with Tab.
+const FIELD_TARGET: usize = 0;
+const FIELD_PORTS: usize = 1;
+const FIELD_SUBNETS: usize = 2;
+const FIELD_COUNT: usize = 3;
+
 struct MenuState {
     screen: Screen,
     selected: usize,          // 0 = Active, 1 = Passive on the mode screen
     target: String,
     ports: String,
-    interfaces: Picker,
+    subnets: Picker,          // suggested targets for the active scan
+    interfaces: Picker,       // capture interfaces for the passive scan
     local_ip: Option<IpAddr>, // this machine's address on the routed interface
-    focused_field: usize,     // which input field is active
+    focused_field: usize,     // which active scan field is focused
     error: Option<String>,
 }
 
 impl MenuState {
     fn new() -> Self {
         let local_ip = routed_local_ip();
+        let subnets = subnet_items(local_ip);
+
+        // Prefilling with the first suggestion makes the common case — sweep the
+        // network this machine is on — need no typing at all.
+        let target = subnets
+            .first()
+            .map(|item| item.value.clone())
+            .unwrap_or_default();
+
         Self {
             screen: Screen::SelectMode,
             selected: 0,
-            target: String::new(),
+            target,
             ports: String::from("1-1024"),
+            subnets: Picker::new(subnets),
             interfaces: Picker::new(interface_items(local_ip)),
             local_ip,
-            focused_field: 0,
+            focused_field: FIELD_TARGET,
             error: None,
         }
     }
@@ -66,7 +84,12 @@ impl MenuState {
     fn panel_size(&self) -> (u16, u16) {
         match self.screen {
             Screen::SelectMode => (56, 13),
-            Screen::ActiveInput => (56, 11),
+            // Title, both text fields and the footer, then the suggestions
+            // table's borders, header and rows.
+            Screen::ActiveInput => {
+                let rows = self.subnets.len().clamp(2, 8) as u16;
+                (92, 11 + (rows + 3))
+            }
             // Title, then the table's borders, header and rows, then the footer.
             // Capped so a long list scrolls rather than running off the screen,
             // and floored so an empty list still has room for its message.
@@ -180,6 +203,40 @@ fn interface_items(routed_ip: Option<IpAddr>) -> Vec<PickerItem> {
         .collect()
 }
 
+/// Locally attached subnets, as picker rows.
+///
+/// Filtering is right here where it was wrong for interfaces: an interface with
+/// no IPv4 offers no subnet to sweep, so there is nothing to show. Unlike the
+/// interface list this is only ever a set of suggestions, since a scan target
+/// can be any address or range at all.
+fn subnet_items(routed_ip: Option<IpAddr>) -> Vec<PickerItem> {
+    let mut seen = HashSet::new();
+
+    ranked_interfaces(routed_ip)
+        .into_iter()
+        .filter_map(|iface| {
+            let net = iface_v4(&iface)?;
+            let cidr = format!("{}/{}", net.network(), net.prefix());
+
+            // Two interfaces can sit on one subnet; offer it once.
+            if !seen.insert(cidr.clone()) {
+                return None;
+            }
+
+            let label = if iface.description.trim().is_empty() {
+                iface.name.clone()
+            } else {
+                iface.description.clone()
+            };
+
+            Some(PickerItem {
+                columns: [cidr.clone(), label, net.size().to_string()],
+                value: cidr,
+            })
+        })
+        .collect()
+}
+
 pub fn run() -> std::io::Result<MenuResult> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -226,23 +283,52 @@ pub fn run() -> std::io::Result<MenuResult> {
                     },
 
                     Screen::ActiveInput => match key.code {
-                        KeyCode::Tab | KeyCode::Down => {
-                            state.focused_field = (state.focused_field + 1) % 2;
+                        KeyCode::Esc => {
+                            state.screen = Screen::SelectMode;
+                            state.error = None;
                         }
-                        KeyCode::BackTab | KeyCode::Up => {
-                            state.focused_field = state.focused_field.saturating_sub(1);
+                        KeyCode::Tab => {
+                            state.focused_field = (state.focused_field + 1) % FIELD_COUNT;
+                        }
+                        KeyCode::BackTab => {
+                            state.focused_field =
+                                (state.focused_field + FIELD_COUNT - 1) % FIELD_COUNT;
+                        }
+
+                        // While the suggestions are focused they own every
+                        // remaining key, so digits pick a row instead of being
+                        // typed and Enter fills the target rather than starting
+                        // the scan.
+                        _ if state.focused_field == FIELD_SUBNETS => {
+                            state.error = None;
+                            if let PickerAction::Chosen = state.subnets.handle_key(key.code) {
+                                if let Some(subnet) =
+                                    state.subnets.selected().map(|item| item.value.clone())
+                                {
+                                    state.target = subnet;
+                                    state.focused_field = FIELD_TARGET;
+                                }
+                            }
+                        }
+
+                        KeyCode::Down => {
+                            state.focused_field = (state.focused_field + 1) % FIELD_COUNT;
+                        }
+                        KeyCode::Up => {
+                            state.focused_field =
+                                (state.focused_field + FIELD_COUNT - 1) % FIELD_COUNT;
                         }
                         KeyCode::Char(c) => {
                             state.error = None;
                             match state.focused_field {
-                                0 => state.target.push(c),
-                                1 => state.ports.push(c),
+                                FIELD_TARGET => state.target.push(c),
+                                FIELD_PORTS => state.ports.push(c),
                                 _ => {}
                             }
                         }
                         KeyCode::Backspace => match state.focused_field {
-                            0 => { state.target.pop(); }
-                            1 => { state.ports.pop(); }
+                            FIELD_TARGET => { state.target.pop(); }
+                            FIELD_PORTS => { state.ports.pop(); }
                             _ => {}
                         },
                         KeyCode::Enter => {
@@ -256,10 +342,6 @@ pub fn run() -> std::io::Result<MenuResult> {
                                 };
                                 break;
                             }
-                        }
-                        KeyCode::Esc => {
-                            state.screen = Screen::SelectMode;
-                            state.error = None;
                         }
                         _ => {}
                     },
@@ -389,13 +471,14 @@ fn draw_mode_select(f: &mut ratatui::Frame, state: &MenuState, area: ratatui::la
     f.render_widget(footer, chunks[3]);
 }
 
-fn draw_active_input(f: &mut ratatui::Frame, state: &MenuState, area: ratatui::layout::Rect) {
+fn draw_active_input(f: &mut Frame, state: &mut MenuState, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),  // title
             Constraint::Length(3),  // target field
             Constraint::Length(3),  // ports field
+            Constraint::Min(5),     // subnet suggestions
             Constraint::Length(2),  // error / footer
         ])
         .split(area);
@@ -406,47 +489,92 @@ fn draw_active_input(f: &mut ratatui::Frame, state: &MenuState, area: ratatui::l
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(title, chunks[0]);
 
-    let target_style = if state.focused_field == 0 {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
     let target = Paragraph::new(state.target.as_str())
         .style(Style::default().fg(Color::White))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(Span::styled(" Target (IP or CIDR) ", target_style)),
+                .title(Span::styled(
+                    " Target (IP or CIDR) ",
+                    field_style(state.focused_field == FIELD_TARGET),
+                )),
         );
     f.render_widget(target, chunks[1]);
 
-    let ports_style = if state.focused_field == 1 {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
     let ports = Paragraph::new(state.ports.as_str())
         .style(Style::default().fg(Color::White))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(Span::styled(" Ports ", ports_style)),
+                .title(Span::styled(
+                    " Ports ",
+                    field_style(state.focused_field == FIELD_PORTS),
+                )),
         );
     f.render_widget(ports, chunks[2]);
 
-    draw_footer(
-        f,
-        state.error.as_deref(),
+    let picking = state.focused_field == FIELD_SUBNETS;
+    if state.subnets.is_empty() {
+        let empty = Paragraph::new(Line::from(Span::styled(
+            "No local subnets detected — type a target above.",
+            Style::default().fg(Color::DarkGray),
+        )))
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL).title(Span::styled(
+            " Suggested targets ",
+            field_style(picking),
+        )));
+        f.render_widget(empty, chunks[3]);
+    } else {
+        state.subnets.render(
+            f,
+            chunks[3],
+            PickerView {
+                title: " Suggested targets ",
+                headers: ["Subnet", "Interface", "Addresses"],
+                widths: [
+                    Constraint::Length(18),
+                    Constraint::Min(24),
+                    Constraint::Length(10),
+                ],
+                focused: picking,
+            },
+        );
+    }
+
+    // Enter does different things depending on focus, so the hints say which.
+    let hints = if picking {
+        Line::from(vec![
+            Span::styled("↑↓", Style::default().fg(Color::Yellow)),
+            Span::raw(" select  "),
+            Span::styled("1-9", Style::default().fg(Color::Yellow)),
+            Span::raw(" jump  "),
+            Span::styled("Enter", Style::default().fg(Color::Yellow)),
+            Span::raw(" use subnet  "),
+            Span::styled("Tab", Style::default().fg(Color::Yellow)),
+            Span::raw(" next field"),
+        ])
+    } else {
         Line::from(vec![
             Span::styled("Tab", Style::default().fg(Color::Yellow)),
             Span::raw(" next field  "),
             Span::styled("Enter", Style::default().fg(Color::Yellow)),
-            Span::raw(" start  "),
+            Span::raw(" start scan  "),
             Span::styled("Esc", Style::default().fg(Color::Yellow)),
             Span::raw(" back"),
-        ]),
-        chunks[3],
-    );
+        ])
+    };
+
+    draw_footer(f, state.error.as_deref(), hints, chunks[4]);
+}
+
+/// Cyan marks the control holding focus, matching the pickers.
+fn field_style(focused: bool) -> Style {
+    if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    }
 }
 
 fn draw_passive_input(f: &mut Frame, state: &mut MenuState, area: Rect) {
@@ -492,13 +620,17 @@ fn draw_passive_input(f: &mut Frame, state: &mut MenuState, area: Rect) {
         state.interfaces.render(
             f,
             chunks[1],
-            " Interfaces ",
-            ["Interface", "Address", "MAC"],
-            [
-                Constraint::Min(24),
-                Constraint::Length(15),
-                Constraint::Length(17),
-            ],
+            PickerView {
+                title: " Interfaces ",
+                headers: ["Interface", "Address", "MAC"],
+                widths: [
+                    Constraint::Min(24),
+                    Constraint::Length(15),
+                    Constraint::Length(17),
+                ],
+                // The only control on this screen, so always focused.
+                focused: true,
+            },
         );
     }
 
@@ -522,6 +654,7 @@ fn draw_passive_input(f: &mut Frame, state: &mut MenuState, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     /// The capture looks the interface up by exact name, so every row must
     /// carry a name that exists — the hardcoded `en0` matched nothing off macOS
@@ -618,6 +751,79 @@ mod tests {
         for n in 1..=expected {
             assert!(rendered.contains(&n.to_string()), "row {n} is not numbered");
         }
+    }
+
+    /// Every suggestion has to survive the parser `main` puts it through, or the
+    /// scan exits with "could not parse target" on a value the app supplied
+    /// itself.
+    #[test]
+    fn every_suggested_subnet_parses_as_a_target() {
+        for item in subnet_items(routed_local_ip()) {
+            let parsed = cidr::Ipv4Cidr::from_str(&item.value);
+            assert!(parsed.is_ok(), "{:?} is not a valid CIDR", item.value);
+        }
+    }
+
+    /// The common case is sweeping the network this machine is on, and it should
+    /// need no typing.
+    #[test]
+    fn the_target_is_prefilled_with_the_first_suggestion() {
+        let state = MenuState::new();
+        let Some(first) = subnet_items(routed_local_ip()).into_iter().next() else {
+            return; // no local subnet on this machine to suggest
+        };
+
+        assert_eq!(state.target, first.value);
+    }
+
+    /// One subnet per row even when several interfaces share it.
+    #[test]
+    fn suggestions_are_not_repeated() {
+        let items = subnet_items(routed_local_ip());
+        let unique: HashSet<&String> = items.iter().map(|item| &item.value).collect();
+
+        assert_eq!(unique.len(), items.len());
+    }
+
+    #[test]
+    fn choosing_a_suggestion_fills_the_target_field() {
+        let mut state = MenuState::new();
+        if state.subnets.len() < 2 {
+            return; // nothing to switch between
+        }
+
+        state.screen = Screen::ActiveInput;
+        state.focused_field = FIELD_SUBNETS;
+        state.subnets.handle_key(KeyCode::Char('2'));
+        let chosen = state.subnets.selected().unwrap().value.clone();
+
+        assert_ne!(state.target, chosen, "test picked the prefilled row");
+
+        // Mirrors what the key loop does on Enter.
+        if let PickerAction::Chosen = state.subnets.handle_key(KeyCode::Enter) {
+            state.target = state.subnets.selected().unwrap().value.clone();
+            state.focused_field = FIELD_TARGET;
+        }
+
+        assert_eq!(state.target, chosen);
+        assert_eq!(state.focused_field, FIELD_TARGET);
+    }
+
+    /// Suggestions are not exhaustive the way capture interfaces are, so an
+    /// arbitrary target must still be typeable.
+    #[test]
+    fn the_target_field_still_accepts_typing() {
+        let mut state = MenuState::new();
+        state.screen = Screen::ActiveInput;
+        state.focused_field = FIELD_TARGET;
+        state.target.clear();
+
+        for c in "10.0.0.5".chars() {
+            state.target.push(c);
+        }
+
+        assert_eq!(state.target, "10.0.0.5");
+        assert!(cidr::Ipv4Cidr::from_str(&state.target).is_ok() || "10.0.0.5".parse::<std::net::Ipv4Addr>().is_ok());
     }
 
     fn render(state: &mut MenuState) -> String {
