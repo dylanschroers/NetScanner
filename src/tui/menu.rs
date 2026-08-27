@@ -15,7 +15,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame, Terminal,
 };
 
@@ -51,6 +51,9 @@ struct MenuState {
     local_ip: Option<IpAddr>, // this machine's address on the routed interface
     focused_field: usize,     // which active scan field is focused
     error: Option<String>,
+    /// How to get capture rights, empty when this process already has them.
+    /// Resolved once: it cannot change while the menu is open.
+    capture_warning: Vec<String>,
 }
 
 impl MenuState {
@@ -75,6 +78,11 @@ impl MenuState {
             local_ip,
             focused_field: FIELD_TARGET,
             error: None,
+            capture_warning: if crate::passive::can_capture() {
+                Vec::new()
+            } else {
+                crate::passive::privilege_hints()
+            },
         }
     }
 
@@ -95,8 +103,28 @@ impl MenuState {
             // and floored so an empty list still has room for its message.
             Screen::PassiveInput => {
                 let rows = self.interfaces.len().clamp(3, 12) as u16;
-                (92, 4 + (rows + 3) + 2)
+                // Widened to fit the warning: it carries a command with an
+                // absolute path, and a truncated command looks copyable but
+                // is not.
+                let width = self
+                    .capture_warning
+                    .iter()
+                    .map(|line| line.chars().count() as u16 + 2)
+                    .max()
+                    .unwrap_or(0)
+                    .max(92);
+                (width, 4 + (rows + 3) + self.warning_height() + 2)
             }
+        }
+    }
+
+    /// Rows the capture warning needs, including its heading line.
+    fn warning_height(&self) -> u16 {
+        if self.capture_warning.is_empty() {
+            0
+        } else {
+            // Heading, the hints, and a spare row for one wrap.
+            self.capture_warning.len() as u16 + 2
         }
     }
 }
@@ -581,9 +609,10 @@ fn draw_passive_input(f: &mut Frame, state: &mut MenuState, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),  // title
-            Constraint::Min(5),     // interface picker
-            Constraint::Length(2),  // error / footer
+            Constraint::Length(4),                       // title
+            Constraint::Min(5),                          // interface picker
+            Constraint::Length(state.warning_height()),  // capture warning, if any
+            Constraint::Length(2),                       // error / footer
         ])
         .split(area);
 
@@ -634,6 +663,21 @@ fn draw_passive_input(f: &mut Frame, state: &mut MenuState, area: Rect) {
         );
     }
 
+    // Said before a choice is made: it applies to every row equally.
+    if !state.capture_warning.is_empty() {
+        let mut lines = vec![Line::from(Span::styled(
+            "This process cannot capture — every interface listed here will fail.",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ))];
+        lines.extend(state.capture_warning.iter().map(|hint| {
+            Line::from(Span::styled(
+                hint.clone(),
+                Style::default().fg(Color::DarkGray),
+            ))
+        }));
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), chunks[2]);
+    }
+
     draw_footer(
         f,
         state.error.as_deref(),
@@ -647,7 +691,7 @@ fn draw_passive_input(f: &mut Frame, state: &mut MenuState, area: Rect) {
             Span::styled("Esc", Style::default().fg(Color::Yellow)),
             Span::raw(" back"),
         ]),
-        chunks[2],
+        chunks[3],
     );
 }
 
