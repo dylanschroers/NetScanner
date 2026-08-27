@@ -34,8 +34,12 @@ Rather than reaching for `sudo` on every run, grant the built binary the one
 capability it needs:
 
 ```bash
-sudo setcap cap_net_raw,cap_net_admin=eip ./target/debug/netscanner
+sudo setcap cap_net_raw+ep ./target/debug/netscanner
 ```
+
+`CAP_NET_RAW` is the whole requirement — it permits opening the `AF_PACKET`
+socket and putting it in promiscuous mode. Nothing here reconfigures an
+interface, so `CAP_NET_ADMIN` is not needed.
 
 `cargo run` then works unprivileged. The grant applies to the file, not the
 project, so re-run it after each rebuild. To check or remove it:
@@ -43,6 +47,15 @@ project, so re-run it after each rebuild. To check or remove it:
 ```bash
 getcap ./target/debug/netscanner
 sudo setcap -r ./target/debug/netscanner
+```
+
+`./run.sh` does the build, the grant and the launch in one step.
+
+To keep the grant across rebuilds, install to a path cargo does not overwrite:
+
+```bash
+cargo install --path .
+sudo setcap cap_net_raw+ep ~/.cargo/bin/netscanner
 ```
 
 Without either, the menu says so before you pick an interface, and repeats the
