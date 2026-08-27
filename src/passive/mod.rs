@@ -84,7 +84,7 @@ pub fn privilege_hints() -> Vec<String> {
     vec![
         String::from("Capture needs raw-socket access. Grant it once, then run again:"),
         // Unindented so it can be selected and copied as a whole line.
-        format!("sudo setcap cap_net_raw,cap_net_admin=eip {binary}"),
+        format!("sudo setcap cap_net_raw+ep {binary}"),
         String::from("The grant is on the file, so re-run it after every rebuild."),
     ]
 }
