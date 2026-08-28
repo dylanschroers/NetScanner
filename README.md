@@ -7,7 +7,7 @@ A lightweight network scanner built in Rust. Designed for local network reconnai
 ## Requirements
 
 - Rust (stable)
-- `sudo` / root — required for raw socket access (ARP, ICMP)
+- Raw socket access — required for ARP, ICMP and passive capture. See [Granting capture rights](#granting-capture-rights).
 
 ---
 
@@ -20,10 +20,49 @@ cargo build --release
 ## Running
 
 ```bash
-sudo cargo run
+cargo build && sudo ./target/debug/netscanner
 ```
 
 The tool launches an interactive menu on startup. No flags required.
+
+Prefer this over `sudo cargo run`, which compiles as root and leaves root-owned
+artifacts in `target/` that later unprivileged builds cannot overwrite.
+
+### Granting capture rights
+
+Rather than reaching for `sudo` on every run, grant the built binary the one
+capability it needs:
+
+```bash
+sudo setcap cap_net_raw+ep ./target/debug/netscanner
+```
+
+`CAP_NET_RAW` is the whole requirement — it permits opening the `AF_PACKET`
+socket and putting it in promiscuous mode. Nothing here reconfigures an
+interface, so `CAP_NET_ADMIN` is not needed.
+
+`cargo run` then works unprivileged. The grant applies to the file, not the
+project, so re-run it after each rebuild. To check or remove it:
+
+```bash
+getcap ./target/debug/netscanner
+sudo setcap -r ./target/debug/netscanner
+```
+
+`./run.sh` does the build, the grant and the launch in one step.
+
+To keep the grant across rebuilds, install to a path cargo does not overwrite:
+
+```bash
+cargo install --path .
+sudo setcap cap_net_raw+ep ~/.cargo/bin/netscanner
+```
+
+Without either, the menu says so before you pick an interface, and repeats the
+exact command to run. Nothing is silently empty.
+
+On Windows this is Npcap instead: install it, and run NetScanner as
+Administrator.
 
 ---
 
@@ -129,4 +168,7 @@ src/
 - ARP scanning only works on local subnets. Remote targets fall back to ICMP.
 - Passive mode is limited on switched networks — you will only see broadcast traffic and traffic addressed to your machine. Devices that have not sent any traffic since capture started will not appear until they do.
 - iOS and some Android devices suppress ARP responses when the screen is off. Wake the device screen if it does not appear during an active scan.
-- Raw socket operations require root. Running without `sudo` will result in a permission error at the packet layer.
+- Raw socket operations require root or `CAP_NET_RAW`. Without them the passive
+  screen reports the failure and the remedy rather than showing an empty table.
+- DHCP identifies a client by MAC before it has an address, so hostnames learned
+  from DHCP are matched to hosts by MAC, not IP.
