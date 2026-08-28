@@ -93,14 +93,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     frame.render_widget(port_table, chunks[2]);
 
     // --- Progress bar ---
+    // No port has been attempted yet during discovery, so a port count there
+    // would just sit at zero for the whole sweep.
     let label = match app.state {
+        ScanState::Discovering => format!(
+            "probing {} address(es)  │  {} host(s) up",
+            app.total_hosts, app.hosts.len()
+        ),
+        ScanState::Scanning => format!(
+            "{}/{} ports scanned",
+            app.scanned_ports, app.total_ports
+        ),
         ScanState::Done => format!(
             "{} host(s) found  │  {} open port(s)",
             app.hosts.len(), app.ports.len()
-        ),
-        _ => format!(
-            "{}/{} ports scanned",
-            app.scanned_ports, app.total_ports
         ),
     };
     let gauge = Gauge::default()
