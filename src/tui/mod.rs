@@ -2,6 +2,7 @@ pub mod app;
 pub mod menu;
 pub mod passive;
 pub mod picker;
+pub mod theme;
 pub mod ui;
 
 use std::net::Ipv4Addr;
@@ -35,6 +36,10 @@ pub enum ScanExit {
     Quit,
     BackToMenu,
 }
+
+/// Rows a PageUp/PageDown moves. Fixed rather than tied to the pane height,
+/// which the results tables do not know at key-handling time.
+const PAGE: isize = 10;
 
 pub async fn run(config: &ScanConfig, targets: Vec<Ipv4Addr>) -> std::io::Result<ScanExit> {
     enable_raw_mode()?;
@@ -121,8 +126,11 @@ pub async fn run(config: &ScanConfig, targets: Vec<Ipv4Addr>) -> std::io::Result
                 match key.code {
                     KeyCode::Char('q') => { exit = ScanExit::Quit;       break; }
                     KeyCode::Esc       => { exit = ScanExit::BackToMenu;  break; }
-                    KeyCode::Down      => app.scroll_hosts_down(),
-                    KeyCode::Up        => app.scroll_hosts_up(),
+                    KeyCode::Tab       => app.toggle_focus(),
+                    KeyCode::Down      => app.scroll(1),
+                    KeyCode::Up        => app.scroll(-1),
+                    KeyCode::PageDown  => app.scroll(PAGE),
+                    KeyCode::PageUp    => app.scroll(-PAGE),
                     _                  => {}
                 }
             }

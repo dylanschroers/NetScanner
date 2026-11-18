@@ -7,6 +7,8 @@ use ratatui::{
     Frame,
 };
 
+use super::theme;
+
 /// Columns a picker shows, not counting the hotkey number it adds itself.
 pub const COLUMNS: usize = 3;
 
@@ -126,32 +128,17 @@ impl Picker {
         let mut all_widths = vec![Constraint::Length(2)];
         all_widths.extend(view.widths);
 
-        let (highlight, title_style) = if view.focused {
-            (
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-                Style::default().fg(Color::Cyan),
-            )
-        } else {
-            (
-                Style::default().add_modifier(Modifier::DIM),
-                Style::default().fg(Color::DarkGray),
-            )
-        };
-
         let table = Table::new(rows, all_widths)
             .header(
                 Row::new(header_cells)
                     .style(Style::default().add_modifier(Modifier::BOLD).fg(Color::White)),
             )
-            .highlight_style(highlight)
-            .highlight_symbol(if view.focused { "▶ " } else { "  " })
+            .highlight_style(theme::selected_row(view.focused))
+            .highlight_symbol(theme::selection_marker(view.focused))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(Span::styled(view.title, title_style))
+                    .title(Span::styled(view.title, theme::title(view.focused)))
                     // Keeps the last column off the border.
                     .padding(Padding::horizontal(1)),
             );

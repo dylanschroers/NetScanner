@@ -20,6 +20,7 @@ use ratatui::{
 };
 
 use super::picker::{Picker, PickerAction, PickerItem, PickerView};
+use super::theme;
 
 // What the menu returns to main once the user confirms their config
 pub enum MenuResult {
@@ -524,7 +525,7 @@ fn draw_active_input(f: &mut Frame, state: &mut MenuState, area: Rect) {
                 .borders(Borders::ALL)
                 .title(Span::styled(
                     " Target (IP or CIDR) ",
-                    field_style(state.focused_field == FIELD_TARGET),
+                    theme::title(state.focused_field == FIELD_TARGET),
                 )),
         );
     f.render_widget(target, chunks[1]);
@@ -536,7 +537,7 @@ fn draw_active_input(f: &mut Frame, state: &mut MenuState, area: Rect) {
                 .borders(Borders::ALL)
                 .title(Span::styled(
                     " Ports ",
-                    field_style(state.focused_field == FIELD_PORTS),
+                    theme::title(state.focused_field == FIELD_PORTS),
                 )),
         );
     f.render_widget(ports, chunks[2]);
@@ -550,7 +551,7 @@ fn draw_active_input(f: &mut Frame, state: &mut MenuState, area: Rect) {
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::ALL).title(Span::styled(
             " Suggested targets ",
-            field_style(picking),
+            theme::title(picking),
         )));
         f.render_widget(empty, chunks[3]);
     } else {
@@ -596,14 +597,6 @@ fn draw_active_input(f: &mut Frame, state: &mut MenuState, area: Rect) {
     draw_footer(f, state.error.as_deref(), hints, chunks[4]);
 }
 
-/// Cyan marks the control holding focus, matching the pickers.
-fn field_style(focused: bool) -> Style {
-    if focused {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    }
-}
 
 fn draw_passive_input(f: &mut Frame, state: &mut MenuState, area: Rect) {
     let chunks = Layout::default()
